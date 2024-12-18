@@ -2,25 +2,97 @@ import React from "react";
 import { useState, useEffect } from "react";
 import { Platform, Text, View, StyleSheet, Button, Alert } from "react-native";
 
-import * as Location from "expo-location";
+import { PermissionsAndroid, AppState } from "react-native";
+import BackgroundJob from "react-native-background-actions";
+import Geolocation from "@react-native-community/geolocation";
 
-import * as TaskManager from "expo-task-manager";
-
-const LOCATION_TASK_NAME = "background-location-task";
-
-let num = 0;
-
-TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
-  if (error) {
-    // 🔴 Log errors if any occur while fetching location data.
-    console.error(`Error fetching location: ${error.message}`);
-    return;
+async function requestMultiplePermissions() {
+  try {
+    await PermissionsAndroid.requestMultiple([
+      PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+    ]);
+    await PermissionsAndroid.requestMultiple([
+      PermissionsAndroid.PERMISSIONS.ACCESS_BACKGROUND_LOCATION,
+    ]);
+    await PermissionsAndroid.requestMultiple([
+      PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION,
+    ]);
+  } catch (err) {
+    console.warn("Permission request error:", err);
   }
-  if (data) {
-    ++num;
-    Alert.alert("received update, ", num.toString());
+}
+
+const getLocationTask = async (taskData: any) => {
+  // Define a function to get the current position
+  const getCurrentPosition = () =>
+    new Promise((resolve, reject) => {
+      Geolocation.getCurrentPosition(
+        (position) => {
+          console.log("Current Position:", position);
+          resolve();
+        },
+        (error) => {
+          console.log("Geolocation error:", error.code, error.message);
+          reject(error);
+        },
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
+      );
+    });
+
+  await new Promise((resolve) => {
+    const intervalId = setInterval(async () => {
+      if (!BackgroundJob.isRunning()) {
+        clearInterval(intervalId); // Stop the interval if the background job is no longer running
+        resolve();
+        return;
+      }
+
+      try {
+        await getCurrentPosition();
+        await BackgroundJob.updateNotification({
+          taskDesc: "Getting position...",
+        });
+      } catch (error) {
+        console.log("Error getting position:", error);
+      }
+    }, 10 * 1000); // Get position every 10 seconds
+  });
+};
+const options = {
+  taskName: "Gelocation Task",
+  taskTitle: "Fetching User Location",
+  taskDesc: "Fetching User Location background and foreground",
+  taskIcon: {
+    name: "ic_launcher",
+    type: "mipmap",
+  },
+  color: "#FF0000",
+  parameters: {
+    delay: 1000,
+  },
+};
+
+// Function to start the background job
+export const startBackgroundJob = async () => {
+  try {
+    console.log("Trying to start background service");
+    await BackgroundJob.start(getLocationTask, options);
+    console.log("Background service started successfully!");
+  } catch (e) {
+    console.log("Error starting background service:", e);
   }
-});
+};
+
+// Function to stop the background job
+export const stopBackgroundJob = async () => {
+  try {
+    console.log("Stopping background service");
+    await BackgroundJob.stop();
+    console.log("Background service stopped successfully!");
+  } catch (e) {
+    console.log("Error stopping background service:", e);
+  }
+};
 
 export default function App() {
   const [location, setLocation] = useState(null);
@@ -28,64 +100,44 @@ export default function App() {
   const [locationStarted, setLocationStarted] = useState(false);
 
   useEffect(() => {
-    async function getCurrentLocation() {
-      let { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== "granted") {
-        setErrorMsg("Permission to fg access location was denied");
-        return;
+    requestMultiplePermissions();
+
+    AppState.addEventListener("change", (nextAppState) => {
+      if (nextAppState === "background") {
+        startBackgroundJob();
+      } else {
+        stopBackgroundJob();
       }
-
-      let { status: bgStatus } =
-        await Location.requestBackgroundPermissionsAsync();
-      if (status !== "granted") {
-        setErrorMsg("Permission to bg access location was denied");
-        return;
-      }
-
-      await Location.isBackgroundLocationAvailableAsync();
-    }
-
-    getCurrentLocation();
-  }, []);
-
-  const startLocationTracking = async () => {
-    await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-      accuracy: Location.Accuracy.Highest,
-      // foregroundService is how you get the task to be updated as often as would be if the app was open
-      showsBackgroundLocationIndicator: true,
-      activityType: Location.ActivityType.AutomotiveNavigation,
-      timeInterval: 3000,
-      foregroundService: {
-        notificationTitle: "Using your location",
-        notificationBody:
-          "To turn off, go back to the app and switch something off.",
-      },
-      pausesUpdatesAutomatically: false,
+    });
+    // Configure Geolocation
+    Geolocation.setRNConfiguration({
+      authorizationLevel: "always", // Request "always" location permission
+      skipPermissionRequests: false, // Prompt for permission if not granted
     });
 
-    // Logramos que comince a trackear?
-    const hasStarted = await Location.hasStartedLocationUpdatesAsync(
-      LOCATION_TASK_NAME
+    /*     // Watch for position updates
+    const watchId = Geolocation.watchPosition(
+      (position) => {
+        console.log(position);
+        // Send the position data to the server
+      },
+      (error) => {
+        console.log(error);
+      },
+      {
+        enableHighAccuracy: true,
+        distanceFilter: 0, // Minimum distance (in meters) to update the location
+        interval: 1000, // Update interval (in milliseconds), which is 15 minutes
+        fastestInterval: 2 * 1000, // Fastest update interval (in milliseconds)
+        useSignificantChanges: false,
+      }
     );
-    setLocationStarted(hasStarted);
-    console.log("Tracking enabled", hasStarted);
-  };
 
-  /**
-   * Detener tracking
-   */
-  const stopLocation = async () => {
-    const tracking = await TaskManager.isTaskRegisteredAsync(
-      LOCATION_TASK_NAME
-    );
-    console.log("Tracking", tracking);
-    if (tracking) {
-      await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
-      console.log("Tracking disabled");
-    } else {
-      console.log("Could not disable tracking");
-    }
-  };
+    // To stop tracking (for example, when the component unmounts):
+    return () => {
+      Geolocation.clearWatch(watchId);
+    }; */
+  }, []);
 
   let text = "Waiting...";
   if (errorMsg) {
@@ -97,10 +149,6 @@ export default function App() {
   return (
     <View>
       <Text>json: {text}</Text>
-
-      <Button onPress={startLocationTracking} title={"Start"} />
-
-      <Button title="Stop" onPress={stopLocation}></Button>
     </View>
   );
 }
